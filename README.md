@@ -34,11 +34,11 @@ This is a single-device demonstration and is not a secure, multi-user election s
 
 ### Before Closing the Application
 
-![screenshot/before.png](https://github.com/NKBelie/Class_Vote_App/blob/main/lib/screenshot/before.png)
+![](https://github.com/NKBelie/Class_Vote_App/blob/main/lib/screenshot/before.png)
 
 ### After Reopening the Application
 
-![(screenshot/After.png)](http://github.com/NKBelie/Class_Vote_App/blob/main/lib/screenshot/after.png)
+![](http://github.com/NKBelie/Class_Vote_App/blob/main/lib/screenshot/after.png)
 
 ## Live API Integration
 
@@ -46,13 +46,13 @@ The Dashboard retrieves current Kigali weather information from the Open-Meteo A
 
 ### Live API Response
 
-![Live data from an API](screenshot/api.png)
+![](screenshot/api.png)
 
 ### No Internet and Retry
 
 When the weather request fails, ClassVote displays an error message and a Retry button.
 
-![No internet](screenshot/no-internet.png)
+![](screenshot/no-internet.png)
 
 ## How to Run
 

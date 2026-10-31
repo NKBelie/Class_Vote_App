@@ -34,11 +34,11 @@ This is a single-device demonstration and is not a secure, multi-user election s
 
 ### Before Closing the Application
 
-![Before closing](screenshots/before.png)
+![Before closing](screenshot/before.png)
 
 ### After Reopening the Application
 
-![After running again](screenshots/after.png)
+![After running again](screenshot/After.png)
 
 ## Live API Integration
 
@@ -46,13 +46,13 @@ The Dashboard retrieves current Kigali weather information from the Open-Meteo A
 
 ### Live API Response
 
-![Live data from an API](screenshots/api.png)
+![Live data from an API](screenshot/api.png)
 
 ### No Internet and Retry
 
 When the weather request fails, ClassVote displays an error message and a Retry button.
 
-![No internet](screenshots/no-internet.png)
+![No internet](screenshot/no-internet.png)
 
 ## How to Run
 

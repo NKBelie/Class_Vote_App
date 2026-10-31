@@ -34,11 +34,11 @@ This is a single-device demonstration and is not a secure, multi-user election s
 
 ### Before Closing the Application
 
-![Before closing](screenshot/before.png)
+![screenshot/before.png](https://github.com/NKBelie/Class_Vote_App/blob/main/lib/screenshot/before.png)
 
 ### After Reopening the Application
 
-![After running again](screenshot/After.png)
+![(screenshot/After.png)](http://github.com/NKBelie/Class_Vote_App/blob/main/lib/screenshot/After.png)
 
 ## Live API Integration
 

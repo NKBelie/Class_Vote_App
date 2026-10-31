@@ -1,10 +1,13 @@
+import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../models/candidate.dart';
-import '../services/election_storage.dart';
+import '../services/election_service.dart';
 import '../theme/app_theme.dart';
-
 import 'dashboard_screen.dart';
 import 'candidates_screen.dart';
 import 'voting_screen.dart';
@@ -18,460 +21,310 @@ class ClassVoteHome extends StatefulWidget {
 }
 
 class _ClassVoteHomeState extends State<ClassVoteHome> {
+  final _db = FirebaseFirestore.instance;
+  final _auth = FirebaseAuth.instance;
+  final _service = ElectionService();
+
+  // Set this to an actual Firestore election document ID.
+  static const String electionId = 'class-election-2026';
+
   int _currentIndex = 0;
-  int _nextId = 5;
-  int? _selectedCandidateId;
-
+  String? _selectedCandidateId;
+  bool _isAdmin = false;
   bool _hasVoted = false;
-  bool _loading = true;
-  bool _saving = false;
-
-  String? _loadError;
-
-  List<Candidate> _candidates = [
-    Candidate(
-      id: 1,
-      name: 'Aline Uwase',
-      manifesto: 'Better communication and teamwork.',
-    ),
-    Candidate(
-      id: 2,
-      name: 'Eric Mugisha',
-      manifesto: 'More student activities and inclusion.',
-    ),
-    Candidate(
-      id: 3,
-      name: 'Diane Ingabire',
-      manifesto: 'A cleaner, more organized classroom.',
-    ),
-    Candidate(
-      id: 4,
-      name: 'Patrick Niyonzima',
-      manifesto: 'Student ideas, action, and accountability.',
-    ),
-  ];
+  bool _statusVerified = false;
+  bool _busy = false;
+  String? _statusError;
+  String _electionStatus = 'draft';
+  List<Candidate> _candidates = [];
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _electionSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _candidateSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _resultsSub;
 
   @override
   void initState() {
     super.initState();
-    _loadElection();
+    _initialize();
   }
 
-  // Load election data when the application opens.
-  Future<void> _loadElection() async {
-    setState(() {
-      _loading = true;
-      _loadError = null;
-    });
+  Future<void> _initialize() async {
+    final user = _auth.currentUser;
+    if (user == null) return;
 
     try {
-      final data = await ElectionStorage.load();
-
+      final token = await user.getIdTokenResult();
       if (!mounted) return;
-
-      setState(() {
-        if (data != null) {
-          _candidates = data.candidates;
-          _nextId = data.nextId;
-          _hasVoted = data.hasVoted;
-        }
-
-        _loading = false;
-      });
-    } catch (error) {
-      if (!mounted) return;
-
-      setState(() {
-        _loadError = 'Unable to load election data: $error';
-        _loading = false;
-      });
+      setState(() => _isAdmin = token.claims?['admin'] == true);
+    } catch (e) {
+      _message('Could not verify administrator permissions: $e');
     }
-  }
 
-  // Save candidates, votes, and voting status.
-  Future<bool> _saveElection() async {
-    if (_saving) return false;
+    _electionSub = _db
+        .collection('elections')
+        .doc(electionId)
+        .snapshots()
+        .listen((doc) {
+          if (!mounted) return;
+          final status = doc.data()?['status'] as String? ?? 'draft';
+          setState(() => _electionStatus = status);
+          if (status == 'closed') {
+            _listenForResults();
+          } else {
+            _resultsSub?.cancel();
+            _resultsSub = null;
+            setState(() {
+              for (final c in _candidates) {
+                c.votes = 0;
+              }
+            });
+          }
+        }, onError: (Object e) => _message('Election loading failed: $e'));
 
-    setState(() {
-      _saving = true;
-    });
-
-    try {
-      await ElectionStorage.save(
-        ElectionData(
-          candidates: _candidates,
-          nextId: _nextId,
-          hasVoted: _hasVoted,
-        ),
-      );
-
-      return true;
-    } catch (error) {
-      _showMessage('Unable to save data: $error');
-      return false;
-    } finally {
-      if (mounted) {
-        setState(() {
-          _saving = false;
-        });
+    _candidateSub = _service.watchCandidates(electionId).listen((snapshot) {
+      if (!mounted) return;
+      final updated = snapshot.docs.map(Candidate.fromFirestore).toList();
+      final previousVotes = {for (final c in _candidates) c.id: c.votes};
+      for (final c in updated) {
+        c.votes = _electionStatus == 'closed' ? (previousVotes[c.id] ?? 0) : 0;
       }
+      setState(() {
+        _candidates = updated;
+        if (!_candidates.any((c) => c.id == _selectedCandidateId)) {
+          _selectedCandidateId = null;
+        }
+      });
+    }, onError: (Object e) => _message('Candidate loading failed: $e'));
+
+    await _refreshVoteStatus();
+  }
+
+  void _listenForResults() {
+    if (_resultsSub != null) return;
+    _resultsSub = _service.watchResults(electionId).listen((snapshot) {
+      if (!mounted) return;
+      final totals = <String, int>{};
+      for (final doc in snapshot.docs) {
+        totals[doc.id] = (doc.data()['votes'] as num?)?.toInt() ?? 0;
+      }
+      setState(() {
+        for (final candidate in _candidates) {
+          candidate.votes = totals[candidate.id] ?? 0;
+        }
+      });
+    }, onError: (Object e) => _message('Results loading failed: $e'));
+  }
+
+  Future<void> _refreshVoteStatus() async {
+    if (mounted) {
+      setState(() {
+        _statusVerified = false;
+        _statusError = null;
+      });
+    }
+    try {
+      // Trusted function checks votes/{request.auth.uid} on the server.
+      final result = await FirebaseFunctions.instanceFor(region: 'us-central1')
+          .httpsCallable('getVoteStatus')
+          .call<Map<String, dynamic>>({'electionId': electionId});
+      if (!mounted) return;
+      setState(() {
+        _hasVoted = result.data['hasVoted'] == true;
+        _statusVerified = true;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(
+        () => _statusError = 'Vote status unavailable. Voting is locked until verification succeeds.',
+      );
     }
   }
 
-  void _showMessage(String message) {
-    if (!mounted) return;
+  CollectionReference<Map<String, dynamic>> get _candidateCollection =>
+      _db.collection('elections').doc(electionId).collection('candidates');
 
+  bool get _canManage => _isAdmin && _electionStatus == 'draft';
+
+  void _message(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(message),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  // Add or edit a candidate.
   Future<void> _editCandidate([Candidate? candidate]) async {
-    if (_saving) return;
-
-    final nameController = TextEditingController(
-      text: candidate?.name ?? '',
-    );
-
+    if (!_canManage || _busy) return;
+    final nameController = TextEditingController(text: candidate?.name ?? '');
     final manifestoController = TextEditingController(
       text: candidate?.manifesto ?? '',
     );
-
     final formKey = GlobalKey<FormState>();
-
-    final confirmed = await showDialog<bool>(
+    final accepted = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: Text(
-            candidate == null ? 'Add candidate' : 'Edit candidate',
-          ),
-          content: Form(
-            key: formKey,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextFormField(
-                    controller: nameController,
-                    decoration: const InputDecoration(
-                      labelText: 'Candidate name',
-                      prefixIcon: Icon(Icons.person_outline),
-                    ),
-                    validator: (value) {
-                      final name = value?.trim() ?? '';
-
-                      if (name.length < 3) {
-                        return 'Enter at least 3 characters.';
-                      }
-
-                      final duplicate = _candidates.any(
-                            (item) =>
-                        item.id != candidate?.id &&
-                            item.name.toLowerCase() ==
-                                name.toLowerCase(),
-                      );
-
-                      if (duplicate) {
-                        return 'Candidate already exists.';
-                      }
-
-                      return null;
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: manifestoController,
-                    maxLines: 3,
-                    maxLength: 150,
-                    decoration: const InputDecoration(
-                      labelText: 'Manifesto',
-                    ),
-                    validator: (value) {
-                      if (value == null || value.trim().isEmpty) {
-                        return 'Please enter a manifesto.';
-                      }
-
-                      return null;
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(dialogContext, false);
-              },
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                if (formKey.currentState!.validate()) {
-                  Navigator.pop(dialogContext, true);
-                }
-              },
-              child: Text(
-                candidate == null ? 'Add candidate' : 'Save changes',
-              ),
-            ),
-          ],
-        );
-      },
-    );
-
-    final name = nameController.text.trim();
-    final manifesto = manifestoController.text.trim();
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      nameController.dispose();
-      manifestoController.dispose();
-    });
-
-    if (confirmed != true || !mounted) return;
-
-    setState(() {
-      if (candidate == null) {
-        _candidates.add(
-          Candidate(
-            id: _nextId++,
-            name: name,
-            manifesto: manifesto,
-          ),
-        );
-      } else {
-        candidate.name = name;
-        candidate.manifesto = manifesto;
-      }
-    });
-
-    if (await _saveElection()) {
-      _showMessage(
-        candidate == null
-            ? 'Candidate added successfully.'
-            : 'Candidate updated successfully.',
-      );
-    }
-  }
-
-  // Delete a candidate.
-  Future<void> _deleteCandidate(Candidate candidate) async {
-    if (_saving) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Delete candidate?'),
-          content: Text(
-            'Are you sure you want to delete ${candidate.name}?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(dialogContext, false);
-              },
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(dialogContext, true);
-              },
-              child: const Text('Delete'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (confirmed != true || !mounted) return;
-
-    setState(() {
-      _candidates.removeWhere(
-            (item) => item.id == candidate.id,
-      );
-
-      if (_selectedCandidateId == candidate.id) {
-        _selectedCandidateId = null;
-      }
-    });
-
-    if (await _saveElection()) {
-      _showMessage('Candidate deleted successfully.');
-    }
-  }
-
-  // Cast a vote.
-  Future<void> _castVote() async {
-    if (_saving) return;
-
-    if (_hasVoted) {
-      _showMessage('You have already voted on this device.');
-      return;
-    }
-
-    if (_selectedCandidateId == null) {
-      _showMessage('Please select a candidate.');
-      return;
-    }
-
-    final matches = _candidates.where(
-          (item) => item.id == _selectedCandidateId,
-    );
-
-    if (matches.isEmpty) {
-      _showMessage('Candidate not found.');
-      return;
-    }
-
-    final candidate = matches.first;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Confirm your vote'),
-          content: Text(
-            'Are you sure you want to vote for ${candidate.name}?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(dialogContext, false);
-              },
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(dialogContext, true);
-              },
-              child: const Text('Confirm vote'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (confirmed != true || !mounted || _hasVoted || _saving) {
-      return;
-    }
-
-    setState(() {
-      candidate.votes++;
-      _hasVoted = true;
-      _selectedCandidateId = null;
-    });
-
-    if (await _saveElection()) {
-      _showMessage('Your vote has been recorded!');
-    } else if (mounted) {
-      setState(() {
-        candidate.votes--;
-        _hasVoted = false;
-      });
-    }
-  }
-
-  // Reset election votes.
-  Future<void> _resetElection() async {
-    if (_saving) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Reset election?'),
-          content: const Text(
-            'This will remove all votes but keep the candidates.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(dialogContext, false);
-              },
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.pop(dialogContext, true);
-              },
-              child: const Text('Reset votes'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (confirmed != true || !mounted) return;
-
-    setState(() {
-      for (final candidate in _candidates) {
-        candidate.votes = 0;
-      }
-
-      _hasVoted = false;
-      _selectedCandidateId = null;
-    });
-
-    if (await _saveElection()) {
-      _showMessage('Election votes reset successfully.');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_loading) {
-      return const Scaffold(
-        body: Center(
-          child: CircularProgressIndicator(),
-        ),
-      );
-    }
-
-    if (_loadError != null) {
-      return Scaffold(
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
+      builder: (dialogContext) => AlertDialog(
+        title: Text(candidate == null ? 'Add candidate' : 'Edit candidate'),
+        content: Form(
+          key: formKey,
+          child: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(
-                  Icons.error_outline,
-                  size: 48,
-                  color: primaryPurple,
+                TextFormField(
+                  controller: nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Candidate name',
+                  ),
+                  validator: (value) {
+                    final name = value?.trim() ?? '';
+                    if (name.length < 3) return 'Enter at least 3 characters.';
+                    if (_candidates.any(
+                      (c) =>
+                          c.id != candidate?.id &&
+                          c.name.toLowerCase() == name.toLowerCase(),
+                    )) {
+                      return 'Candidate already exists.';
+                    }
+                    return null;
+                  },
                 ),
-                const SizedBox(height: 16),
-                Text(
-                  _loadError!,
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                FilledButton(
-                  onPressed: _loadElection,
-                  child: const Text('Retry'),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: manifestoController,
+                  maxLines: 3,
+                  maxLength: 150,
+                  decoration: const InputDecoration(labelText: 'Manifesto'),
+                  validator: (value) => (value?.trim().isEmpty ?? true)
+                      ? 'Enter a manifesto.'
+                      : null,
                 ),
               ],
             ),
           ),
         ),
-      );
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState!.validate())
+                Navigator.pop(dialogContext, true);
+            },
+            child: Text(candidate == null ? 'Add' : 'Save'),
+          ),
+        ],
+      ),
+    );
+    final name = nameController.text.trim();
+    final manifesto = manifestoController.text.trim();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      nameController.dispose();
+      manifestoController.dispose();
+    });
+    if (accepted != true || !mounted) {
+      return;
     }
+    setState(() => _busy = true);
+    try {
+      if (candidate == null) {
+        await _candidateCollection.add({
+          'name': name,
+          'manifesto': manifesto,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      } else {
+        await _candidateCollection.doc(candidate.id).update({
+          'name': name,
+          'manifesto': manifesto,
+        });
+      }
+      _message(candidate == null ? 'Candidate added.' : 'Candidate updated.');
+    } catch (e) {
+      _message('Could not save candidate: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
 
+  Future<void> _deleteCandidate(Candidate candidate) async {
+    if (!_canManage || _busy) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete candidate?'),
+        content: Text('Remove ${candidate.name} from this election?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await _candidateCollection.doc(candidate.id).delete();
+      _message('Candidate deleted.');
+    } catch (e) {
+      _message('Could not delete candidate: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _castVote() async {
+    final String? id = _selectedCandidateId;
+
+    if (_busy ||
+        !_statusVerified ||
+        _hasVoted ||
+        _isAdmin ||
+        _electionStatus != 'active' ||
+        id == null) {
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await _service.castVote(electionId: electionId, candidateId: id);
+      if (!mounted) return;
+      setState(() {
+        _hasVoted = true;
+        _selectedCandidateId = null;
+      });
+      _message('Your vote has been recorded!');
+    } on FirebaseException catch (e) {
+      _message('Vote rejected: ${e.message ?? e.code}');
+      await _refreshVoteStatus();
+    } catch (e) {
+      _message('Unable to submit vote: $e');
+      await _refreshVoteStatus();
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _electionSub?.cancel();
+    _candidateSub?.cancel();
+    _resultsSub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final titles = [
       'ClassVote',
       'Candidates',
       'Cast your vote',
       'Election results',
     ];
-
+    final resultsReady = _electionStatus == 'closed';
     return Scaffold(
       appBar: AppBar(
         title: Text(
@@ -482,26 +335,22 @@ class _ClassVoteHomeState extends State<ClassVoteHome> {
           ),
         ),
         actions: [
-          if (_saving)
+          if (_busy)
             const Padding(
               padding: EdgeInsets.all(12),
               child: SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                ),
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
               ),
             ),
           IconButton(
-            tooltip: 'Reset election',
-            onPressed: _saving ? null : _resetElection,
-            icon: const Icon(Icons.restart_alt_rounded),
+            tooltip: 'Sign out',
+            onPressed: _busy ? null : () => FirebaseAuth.instance.signOut(),
+            icon: const Icon(Icons.logout),
           ),
         ],
       ),
-
-      // Connect the four real ClassVote screens.
       body: SafeArea(
         child: IndexedStack(
           index: _currentIndex,
@@ -509,88 +358,86 @@ class _ClassVoteHomeState extends State<ClassVoteHome> {
             DashboardScreen(
               candidates: _candidates,
               hasVoted: _hasVoted,
-              onVote: () {
-                setState(() {
-                  _currentIndex = 2;
-                });
-              },
-              onCandidates: () {
-                setState(() {
-                  _currentIndex = 1;
-                });
-              },
-              onResults: () {
-                setState(() {
-                  _currentIndex = 3;
-                });
-              },
+              onVote: () => setState(() => _currentIndex = 2),
+              onCandidates: () => setState(() => _currentIndex = 1),
+              onResults: () => setState(() => _currentIndex = 3),
             ),
-
             CandidatesScreen(
               candidates: _candidates,
+              isAdmin: _isAdmin,
+              electionStatus: _electionStatus,
               onAdd: () => _editCandidate(),
-              onEdit: _editCandidate,
+              onEdit: (candidate) => _editCandidate(candidate),
               onDelete: _deleteCandidate,
             ),
-
-            VotingScreen(
-              candidates: _candidates,
-              hasVoted: _hasVoted,
-              selectedCandidateId: _selectedCandidateId,
-              onSelect: (id) {
-                setState(() {
-                  _selectedCandidateId = id;
-                });
-              },
-              onConfirm: _castVote,
-              onCandidates: () {
-                setState(() {
-                  _currentIndex = 1;
-                });
-              },
-            ),
-
-            ResultsScreen(
-              candidates: _candidates,
-              onReset: _resetElection,
-              onCandidates: () {
-                setState(() {
-                  _currentIndex = 1;
-                });
-              },
-            ),
+            !_statusVerified && !_isAdmin
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(_statusError ?? 'Checking voting eligibility...'),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: _refreshVoteStatus,
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  )
+                : VotingScreen(
+                    candidates: _candidates,
+                    hasVoted: _hasVoted,
+                    selectedCandidateId: _selectedCandidateId,
+                    onSelect: (id) => setState(() => _selectedCandidateId = id),
+                    onConfirm: _castVote,
+                    onCandidates: () => setState(() => _currentIndex = 1),
+                    electionStatus: _isAdmin ? 'draft' : _electionStatus,
+                    isSubmitting: _busy,
+                  ),
+            resultsReady
+                ? ResultsScreen(
+                    candidates: _candidates,
+                    onReset: () => _message(
+                      'Shared elections cannot be reset from the app.',
+                    ),
+                    onCandidates: () => setState(() => _currentIndex = 1),
+                  )
+                : const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text(
+                        'Official results will be available after the election closes.',
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
           ],
         ),
       ),
-
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         backgroundColor: Colors.white,
         indicatorColor: lightPurple,
-        onDestinationSelected: (index) {
-          setState(() {
-            _currentIndex = index;
-          });
-        },
+        onDestinationSelected: (index) => setState(() => _currentIndex = index),
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.dashboard_outlined),
-            selectedIcon: Icon(Icons.dashboard_rounded),
+            selectedIcon: Icon(Icons.dashboard),
             label: 'Home',
           ),
           NavigationDestination(
             icon: Icon(Icons.groups_outlined),
-            selectedIcon: Icon(Icons.groups_rounded),
+            selectedIcon: Icon(Icons.groups),
             label: 'Candidates',
           ),
           NavigationDestination(
             icon: Icon(Icons.how_to_vote_outlined),
-            selectedIcon: Icon(Icons.how_to_vote_rounded),
+            selectedIcon: Icon(Icons.how_to_vote),
             label: 'Vote',
           ),
           NavigationDestination(
             icon: Icon(Icons.bar_chart_outlined),
-            selectedIcon: Icon(Icons.bar_chart_rounded),
+            selectedIcon: Icon(Icons.bar_chart),
             label: 'Results',
           ),
         ],

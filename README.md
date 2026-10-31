@@ -38,7 +38,7 @@ This is a single-device demonstration and is not a secure, multi-user election s
 
 ### After Reopening the Application
 
-![(screenshot/After.png)](http://github.com/NKBelie/Class_Vote_App/blob/main/lib/screenshot/After.png)
+![(screenshot/After.png)](http://github.com/NKBelie/Class_Vote_App/blob/main/lib/screenshot/after.png)
 
 ## Live API Integration
 

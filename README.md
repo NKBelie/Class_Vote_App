@@ -61,11 +61,11 @@ The Firebase-enabled version introduces a separate cloud-based approach for shar
 
 ### Before Closing the Application
 
-![Before closing the application](lib/screenshot/before.png)
+![Before closing the application](lib/screenshots/before.png)
 
 ### After Reopening the Application
 
-![After reopening the application](lib/screenshot/after.png)
+![After reopening the application](lib/screenshots/after.png)
 
 ## Live API Integration
 
@@ -73,13 +73,13 @@ The Dashboard retrieves current Kigali weather information from the Open-Meteo A
 
 ### Live API Response
 
-![Live API response](screenshot/api.png)
+![Live API response](screenshots/api.png)
 
 ### No Internet and Retry
 
 When the weather request fails, ClassVote displays an error message and a Retry button.
 
-![No internet connection](screenshot/no-internet.png)
+![No internet connection](screenshots/no-internet.png)
 
 ## Firebase Authentication
 
@@ -200,12 +200,12 @@ Some backend operations require Cloud Functions and security configuration befor
 
 The original project screenshots demonstrate local persistence, API integration, and offline error handling.
 
-| Feature | Screenshot |
-|---|---|
-| Before closing | `lib/screenshot/before.png` |
-| After reopening | `lib/screenshot/after.png` |
-| Live weather API | `screenshot/api.png` |
-| No internet | `screenshot/no-internet.png` |
+| Feature | Screenshot                    |
+|---|-------------------------------|
+| Before closing | `lib/screenshots/before.png`  |
+| After reopening | `lib/screenshots/after.png`   |
+| Live weather API | `screenshots/api.png`         |
+| No internet | `screenshots/no-internet.png` |
 
 ### Session 6 — Firebase Integration
 

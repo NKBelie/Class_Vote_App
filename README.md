@@ -73,13 +73,13 @@ The Dashboard retrieves current Kigali weather information from the Open-Meteo A
 
 ### Live API Response
 
-![Live API response](screenshots/api.png)
+![Live API response](lib/screenshots/api.png)
 
 ### No Internet and Retry
 
 When the weather request fails, ClassVote displays an error message and a Retry button.
 
-![No internet connection](screenshots/no-internet.png)
+![No internet connection](lib/screenshots/no-internet.png)
 
 ## Firebase Authentication
 
@@ -93,7 +93,7 @@ The authentication flow is managed through an `AuthGate` widget.
 
 ### Login Screen
 
-![ClassVote Firebase login screen](screenshots/login.png)
+![ClassVote Firebase login screen](lib/screenshots/login.png)
 
 ## Cloud Firestore Integration
 
@@ -137,7 +137,7 @@ The `votes` collection is designed to use each authenticated user's UID as a vot
 
 ### Firestore Console
 
-![ClassVote data stored in Cloud Firestore](screenshots/console.png)
+![ClassVote data stored in Cloud Firestore](lib/screenshots/console.png)
 
 ### Real-Time Firestore Updates
 
@@ -145,7 +145,7 @@ Cloud Firestore snapshot listeners allow the application to respond to changes i
 
 For example, when an authorized administrator adds a candidate to Firestore, the candidate list can update automatically on connected clients.
 
-![Live Firestore update](screenshots/live.png)
+![Live Firestore update](lib/screenshots/live.png)
 
 ## Authentication and Data Access Testing
 
@@ -159,7 +159,7 @@ This must be verified using genuinely user-owned data and restrictive Firestore 
 
 ### Second Account Access Test
 
-![Second account data isolation test](screenshots/denied.png)
+![Second account data isolation test](lib/screenshots/denied.png)
 
 ## Election Roles and Access Control
 
